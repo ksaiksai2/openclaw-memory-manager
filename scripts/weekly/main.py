@@ -5,6 +5,8 @@
 ================
 流程：读取近7天 daily 摘要 → 本地模型生成周度摘要 → 云端模型进化 USER/MEMORY/AGENTS
 执行时间：每周日 23:00（Windows 计划任务）
+
+支持多 Agent 分区：自动发现所有 agent，逐个处理。
 """
 
 import sys
@@ -19,7 +21,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from common.utils import (
-    ABSTRACTED_DAILY_DIR,
     ABSTRACTED_WEEKLY_DIR,
     FILE_SIZE_LIMITS,
     MARKER_AGENTS,
@@ -33,9 +34,14 @@ from common.utils import (
     call_deepseek,
     check_and_compact_files,
     ensure_dir,
+    get_abstracted_dir,
+    get_agent_workspace,
     get_evolution_system_prompt,
     get_today_compact,
     get_today_str,
+    list_agents,
+    list_daily_abstracts,
+    list_session_files,
     log_diff,
     parse_deepseek_evolution,
     read_file_safe,
@@ -43,6 +49,9 @@ from common.utils import (
     setup_logger,
     split_text_by_chars,
 )
+
+# 为 call_deepseek 创建别名
+call_llm = call_deepseek
 
 
 def main():
@@ -67,143 +76,46 @@ def main():
     success = False
     try:
         # ════════════════════════════════════════════
-        # 步骤 1：读取近 7 天 daily 摘要
+        # 步骤 0：发现所有 Agent
         # ════════════════════════════════════════════
-        logger.info("[步骤 1] 读取近 7 天 daily 摘要")
+        agents = list_agents()
+        logger.info(f"[步骤 0] 发现 {len(agents)} 个 Agent: {agents}")
 
-        end_date = datetime.now()
-        daily_files = []
-        for i in range(7):
-            d = end_date - timedelta(days=i)
-            date_str = d.strftime("%Y-%m-%d")
-            path = ABSTRACTED_DAILY_DIR / f"{date_str}-abstracted.md"
-            if path.exists():
-                daily_files.append((date_str, path))
-                logger.info(f"  找到: {path.name}")
-            else:
-                logger.info(f"  缺失: {date_str}-abstracted.md")
-
-        if not daily_files:
-            logger.info("近 7 天无 daily 摘要，跳过本周整理")
-            send_notification("OpenClaw 记忆整理", "无可用摘要，跳过", is_error=True)
+        if not agents:
+            logger.info("未发现任何 Agent，跳过本周整理")
+            send_notification("OpenClaw 记忆整理", "未发现 Agent，跳过", is_error=True)
             return
 
-        logger.info(f"共找到 {len(daily_files)} 个 daily 摘要")
-
-        # 合并所有 daily 摘要文本
-        all_texts = []
-        for date_str, path in daily_files:
-            content = read_file_safe(path)
-            if content:
-                all_texts.append(f"=== {date_str} ===\n{content}")
-
-        merged_text = "\n\n".join(all_texts)
-        logger.info(f"合并文本总字符: {len(merged_text)}")
-        send_notification("OpenClaw 记忆整理", "Chunking Done!")
-
         # ════════════════════════════════════════════
-        # 步骤 2：云端模型生成周度摘要
+        # 逐个 Agent 处理
         # ════════════════════════════════════════════
-        logger.info("[步骤 2] 云端模型生成周度摘要")
+        all_success = True
+        for agent_name in agents:
+            logger.info(f"\n{'─' * 50}")
+            logger.info(f"开始处理 Agent: {agent_name}")
+            logger.info(f"{'─' * 50}")
 
-        if dry_run:
-            week_summary = "[DRY RUN] 模拟周度摘要内容，跳过云端模型调用。"
-            logger.info("[DRY RUN] 跳过模型调用，使用模拟摘要")
-        else:
-            system_prompt = (
-                "你是一个内容提炼助手。请阅读以下多天的每日摘要，生成一份周度综合摘要。\n\n"
-                "输出要求：\n"
-                "1. 输出 1500 字以内的中文周度综合摘要\n"
-                "2. 合并各天信息，去除重复\n"
-                "3. 按主题/项目分类归纳，而非按日期罗列\n"
-                "4. 突出重要决策、任务进展、新增偏好\n"
-                "5. 保留待办事项和未完成的任务\n"
-                "6. 使用条目式结构"
-            )
-
-            # 检测是否需要分批
-            if len(system_prompt) + len(merged_text) > SPLIT_THRESHOLD:
-                logger.info("文本超限，分批调用云端模型")
-                chunks = split_text_by_chars(merged_text, SPLIT_THRESHOLD)
-                chunk_summaries = []
-                for ci, chunk in enumerate(chunks, 1):
-                    logger.info(f"  分批 {ci}/{len(chunks)} ({len(chunk)} 字符)")
-                    ok, result, err = call_deepseek(chunk, system=system_prompt, top_p=0.8, logger=logger)
-                    if ok:
-                        chunk_summaries.append(result)
-                    else:
-                        logger.warning(f"  分批 {ci} 失败: {err}")
-
-                if not chunk_summaries:
-                    logger.error("所有分批调用失败")
-                    send_notification("OpenClaw 记忆整理", "云端模型调用全部失败", is_error=True)
-                    return
-
-                if len(chunk_summaries) > 1:
-                    merged_summaries = "\n\n---\n\n".join(chunk_summaries)
-                    merge_prompt = (
-                        "以下是本周各分块的摘要，请合并为一份完整周度摘要，"
-                        "1500 字以内，去除重复，按主题归纳：\n\n" + merged_summaries
-                    )
-                    ok, week_summary, err = call_deepseek(
-                        merge_prompt, system=system_prompt, top_p=0.8, logger=logger
-                    )
-                    if not ok:
-                        logger.warning(f"合并提炼失败，使用分批拼接: {err}")
-                        week_summary = "\n\n".join(chunk_summaries)
-                else:
-                    week_summary = chunk_summaries[0]
-            else:
-                ok, week_summary, err = call_deepseek(
-                    merged_text, system=system_prompt, top_p=0.8, logger=logger
-                )
-                if not ok:
-                    logger.error(f"云端模型调用失败: {err}")
-                    send_notification("OpenClaw 记忆整理", f"云端模型调用失败: {err}", is_error=True)
-                    return
-
-        # 计算日期范围
-        dates = [d for d, _ in daily_files]
-        dates.sort()
-        week_range = f"{dates[0]}至{dates[-1]}"
-
-        # 写入周摘要文件
-        header = f"# 每周摘要 {week_range}\n\n"
-        stats = (
-            f"> 覆盖天数: {len(daily_files)} | "
-            f"日期范围: {week_range}\n"
-            f"> 总字符: {len(header) + len(week_summary)}\n\n---\n\n"
-        )
-        abstract_content = header + stats + week_summary + "\n"
-        abstract_path = ABSTRACTED_WEEKLY_DIR / f"{week_range}-abstracted.md"
-        ensure_dir(ABSTRACTED_WEEKLY_DIR)
-        atomic_write(abstract_path, abstract_content)
-        logger.info(f"周摘要写入: {abstract_path} ({len(abstract_content)} 字符)")
-
-        send_notification("OpenClaw 记忆整理", "Abstracting Done!")
-
-        # ════════════════════════════════════════════
-        # 步骤 3：云端模型进化 USER/MEMORY/AGENTS
-        # ════════════════════════════════════════════
-        logger.info("[步骤 3] 云端模型进化")
-
-        if dry_run:
-            logger.info("[DRY RUN] 跳过进化步骤")
-        else:
-            ok = run_evolution(abstract_path, logger)
-            if not ok:
-                logger.error("云端进化失败")
-                send_notification("OpenClaw 记忆整理", "云端进化失败", is_error=True)
-                return
+            try:
+                agent_success = process_agent(agent_name, dry_run, logger)
+                if not agent_success:
+                    all_success = False
+                    logger.error(f"Agent {agent_name} 处理失败")
+            except Exception as e:
+                all_success = False
+                logger.exception(f"Agent {agent_name} 处理异常: {e}")
 
         # ════════════════════════════════════════════
         # 完成
         # ════════════════════════════════════════════
-        success = True
-        logger.info("=" * 60)
-        logger.info("每周记忆整理完成")
-        logger.info("=" * 60)
-        send_notification("OpenClaw 记忆整理", "每周记忆整理完成！")
+        if all_success:
+            success = True
+            logger.info("=" * 60)
+            logger.info("每周记忆整理完成（所有 Agent）")
+            logger.info("=" * 60)
+            send_notification("OpenClaw 记忆整理", "每周记忆整理完成！")
+        else:
+            logger.warning("部分 Agent 处理失败，详见日志")
+            send_notification("OpenClaw 记忆整理", "部分 Agent 处理失败", is_error=True)
 
     except Exception as e:
         logger.exception(f"每周任务异常: {e}")
@@ -214,11 +126,162 @@ def main():
             logger.info("本轮任务未成功完成")
 
 
-def run_evolution(abstract_path: Path, logger) -> bool:
-    """调用 DeepSeek 进化 USER/MEMORY/AGENTS。"""
-    user_md = read_file_safe(WORKSPACE_DIR / "USER.md")
-    memory_md = read_file_safe(WORKSPACE_DIR / "MEMORY.md")
-    agents_md = read_file_safe(WORKSPACE_DIR / "AGENTS.md")
+def process_agent(agent_name: str, dry_run: bool, logger) -> bool:
+    """处理单个 Agent 的每周记忆整理。
+
+    Args:
+        agent_name: Agent 名称
+        dry_run: 是否为试运行模式
+        logger: 日志记录器
+
+    Returns:
+        是否处理成功
+    """
+    # 获取 Agent 特定的目录
+    agent_ws = get_agent_workspace(agent_name)
+    abstract_dir = get_abstracted_dir("weekly", agent_name)
+
+    logger.info(f"Agent workspace: {agent_ws}")
+    logger.info(f"Weekly abstract dir: {abstract_dir}")
+
+    # ──────────────────────────────────────────────
+    # 步骤 1：读取近 7 天 daily 摘要
+    # ──────────────────────────────────────────────
+    logger.info(f"[步骤 1] 读取 {agent_name} 近 7 天 daily 摘要")
+
+    daily_files = list_daily_abstracts(days=7, agent_name=agent_name)
+
+    if not daily_files:
+        logger.info(f"Agent {agent_name} 近 7 天无 daily 摘要，跳过")
+        return True  # 无摘要不算失败
+
+    logger.info(f"共找到 {len(daily_files)} 个 daily 摘要")
+
+    # 合并所有 daily 摘要文本
+    all_texts = []
+    for path in daily_files:
+        content = read_file_safe(path)
+        if content:
+            # 从文件名提取日期
+            date_str = path.stem.replace("-abstracted", "")
+            all_texts.append(f"=== {date_str} ===\n{content}")
+
+    merged_text = "\n\n".join(all_texts)
+    logger.info(f"合并文本总字符: {len(merged_text)}")
+
+    # ──────────────────────────────────────────────
+    # 步骤 2：云端模型生成周度摘要
+    # ──────────────────────────────────────────────
+    logger.info(f"[步骤 2] 为 {agent_name} 生成周度摘要")
+
+    if dry_run:
+        week_summary = f"[DRY RUN] 模拟 {agent_name} 周度摘要内容，跳过云端模型调用。"
+        logger.info("[DRY RUN] 跳过模型调用，使用模拟摘要")
+    else:
+        system_prompt = (
+            f"你是一个内容提炼助手。请阅读以下 {agent_name} 多天的每日摘要，生成一份周度综合摘要。\n\n"
+            "输出要求：\n"
+            "1. 输出 1500 字以内的中文周度综合摘要\n"
+            "2. 合并各天信息，去除重复\n"
+            "3. 按主题/项目分类归纳，而非按日期罗列\n"
+            "4. 突出重要决策、任务进展、新增偏好\n"
+            "5. 保留待办事项和未完成的任务\n"
+            "6. 使用条目式结构"
+        )
+
+        # 检测是否需要分批
+        if len(system_prompt) + len(merged_text) > SPLIT_THRESHOLD:
+            logger.info("文本超限，分批调用云端模型")
+            chunks = split_text_by_chars(merged_text, SPLIT_THRESHOLD)
+            chunk_summaries = []
+            for ci, chunk in enumerate(chunks, 1):
+                logger.info(f"  分批 {ci}/{len(chunks)} ({len(chunk)} 字符)")
+                ok, result, err = call_llm(chunk, system=system_prompt, top_p=0.8, logger=logger)
+                if ok:
+                    chunk_summaries.append(result)
+                else:
+                    logger.warning(f"  分批 {ci} 失败: {err}")
+
+            if not chunk_summaries:
+                logger.error(f"Agent {agent_name} 所有分批调用失败")
+                return False
+
+            if len(chunk_summaries) > 1:
+                merged_summaries = "\n\n---\n\n".join(chunk_summaries)
+                merge_prompt = (
+                    f"以下是 {agent_name} 本周各分块的摘要，请合并为一份完整周度摘要，"
+                    "1500 字以内，去除重复，按主题归纳：\n\n" + merged_summaries
+                )
+                ok, week_summary, err = call_llm(
+                    merge_prompt, system=system_prompt, top_p=0.8, logger=logger
+                )
+                if not ok:
+                    logger.warning(f"合并提炼失败，使用分批拼接: {err}")
+                    week_summary = "\n\n".join(chunk_summaries)
+            else:
+                week_summary = chunk_summaries[0]
+        else:
+            ok, week_summary, err = call_llm(
+                merged_text, system=system_prompt, top_p=0.8, logger=logger
+            )
+            if not ok:
+                logger.error(f"云端模型调用失败: {err}")
+                return False
+
+    # 计算日期范围
+    dates = [p.stem.replace("-abstracted", "") for p in daily_files]
+    dates.sort()
+    week_range = f"{dates[0]}至{dates[-1]}"
+
+    # 写入周摘要文件
+    header = f"# 每周摘要 {week_range} ({agent_name})\n\n"
+    stats = (
+        f"> Agent: {agent_name}\n"
+        f"> 覆盖天数: {len(daily_files)} | "
+        f"日期范围: {week_range}\n"
+        f"> 总字符: {len(header) + len(week_summary)}\n\n---\n\n"
+    )
+    abstract_content = header + stats + week_summary + "\n"
+    abstract_path = abstract_dir / f"{week_range}-abstracted.md"
+    ensure_dir(abstract_dir)
+    atomic_write(abstract_path, abstract_content)
+    logger.info(f"周摘要写入: {abstract_path} ({len(abstract_content)} 字符)")
+
+    send_notification("OpenClaw 记忆整理", f"{agent_name} Abstracting Done!")
+
+    # ──────────────────────────────────────────────
+    # 步骤 3：云端模型进化 USER/MEMORY/AGENTS
+    # ──────────────────────────────────────────────
+    logger.info(f"[步骤 3] 为 {agent_name} 进化文档")
+
+    if dry_run:
+        logger.info("[DRY RUN] 跳过进化步骤")
+    else:
+        ok = run_evolution(abstract_path, agent_name, agent_ws, logger)
+        if not ok:
+            logger.error(f"Agent {agent_name} 云端进化失败")
+            return False
+
+    logger.info(f"Agent {agent_name} 处理完成")
+    send_notification("OpenClaw 记忆整理", f"{agent_name} 每周整理完成！")
+    return True
+
+
+def run_evolution(abstract_path: Path, agent_name: str, workspace_dir: Path, logger) -> bool:
+    """调用 DeepSeek 进化 USER/MEMORY/AGENTS。
+
+    Args:
+        abstract_path: 周摘要文件路径
+        agent_name: Agent 名称
+        workspace_dir: Agent 的 workspace 目录
+        logger: 日志记录器
+
+    Returns:
+        是否进化成功
+    """
+    user_md = read_file_safe(workspace_dir / "USER.md")
+    memory_md = read_file_safe(workspace_dir / "MEMORY.md")
+    agents_md = read_file_safe(workspace_dir / "AGENTS.md")
 
     if not all([user_md, memory_md, agents_md]):
         missing = []
@@ -228,7 +291,7 @@ def run_evolution(abstract_path: Path, logger) -> bool:
             missing.append("MEMORY.md")
         if not agents_md:
             missing.append("AGENTS.md")
-        logger.error(f"workspace 文件缺失: {missing}")
+        logger.error(f"Agent {agent_name} workspace 文件缺失: {missing}")
         return False
 
     abstract = read_file_safe(abstract_path)
@@ -239,7 +302,7 @@ def run_evolution(abstract_path: Path, logger) -> bool:
     system_prompt = get_evolution_system_prompt("weekly")
 
     user_prompt = (
-        "以下是当前三个文档和本周综合摘要，请输出进化后的文档。\n\n"
+        f"以下是 {agent_name} 的当前三个文档和本周综合摘要，请输出进化后的文档。\n\n"
         "=== 当前 USER.md ===\n"
         f"{user_md}\n\n"
         "=== 当前 MEMORY.md ===\n"
@@ -250,7 +313,7 @@ def run_evolution(abstract_path: Path, logger) -> bool:
         f"{abstract}"
     )
 
-    ok, content, err = call_deepseek(user_prompt, system=system_prompt, top_p=0.8, logger=logger)
+    ok, content, err = call_llm(user_prompt, system=system_prompt, top_p=0.8, logger=logger)
     if not ok:
         logger.error(f"DeepSeek 调用失败: {err}")
         return False
@@ -262,9 +325,9 @@ def run_evolution(abstract_path: Path, logger) -> bool:
         return False
 
     files_to_write = [
-        (WORKSPACE_DIR / "USER.md", result["user"], "USER.md"),
-        (WORKSPACE_DIR / "MEMORY.md", result["memory"], "MEMORY.md"),
-        (WORKSPACE_DIR / "AGENTS.md", result["agents"], "AGENTS.md"),
+        (workspace_dir / "USER.md", result["user"], "USER.md"),
+        (workspace_dir / "MEMORY.md", result["memory"], "MEMORY.md"),
+        (workspace_dir / "AGENTS.md", result["agents"], "AGENTS.md"),
     ]
 
     # 检查文件大小，超限则压缩
@@ -274,11 +337,11 @@ def run_evolution(abstract_path: Path, logger) -> bool:
         old_content = read_file_safe(path) or ""
         bak = backup_file(path)
         logger.info(f"备份 {name} → {bak}")
-        log_diff(path, old_content, new_content, "weekly", logger)
+        log_diff(path, old_content, new_content, f"weekly-{agent_name}", logger)
         atomic_write(path, new_content)
         logger.info(f"写入 {name} ({len(new_content)} 字符)")
 
-    logger.info("云端进化完成")
+    logger.info(f"Agent {agent_name} 云端进化完成")
     return True
 
 

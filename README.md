@@ -2,7 +2,9 @@
 
 > 让 OpenClaw 越来越懂你——主动沉淀记忆，而不是等你提醒它"记住XXX"。
 
-每天自动读取 TencentDB Agent Memory 的会话记录，用 LLM 提炼关键信息，主动写入 `USER.md` / `MEMORY.md` / `AGENTS.md`。agent 日常提及旧项目时直接读几行就够，不需要费时费 token 去检索。支持 DeepSeek、OpenAI、Moonshot、通义千问、智谱、SiliconFlow 等主流 Provider。
+每天自动读取 TencentDB Agent Memory 的会话记录，用 LLM 提炼关键信息，主动写入 `USER.md` / `MEMORY.md` / `AGENTS.md`。agent 日常提及旧项目时直接读几行就够，不需要费时费 token 去检索。
+
+支持多 Agent 独立记忆分区（如 main、echo 各自维护独立记忆），支持 DeepSeek、OpenAI、Moonshot、通义千问、智谱、SiliconFlow 等主流 Provider。
 
 详细说明见 [介绍.md](介绍.md)。
 

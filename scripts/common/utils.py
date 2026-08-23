@@ -67,7 +67,8 @@ ABSTRACTED_MONTHLY_DIR = PROJECT_ROOT / "memory-abstracted-monthly"
 LOG_DIR = PROJECT_ROOT / "run_log"
 
 # 脚本目录
-SCRIPTS_DIR = PROJECT_ROOT / "scripts"
+# 脚本目录（兼容中文目录名"脚本"和英文"scripts"）
+SCRIPTS_DIR = PROJECT_ROOT / "脚本" if (PROJECT_ROOT / "脚本").exists() else PROJECT_ROOT / "scripts"
 CHUNKING_SCRIPT = SCRIPTS_DIR / "daily" / "convert_jsonl_to_md.py"
 
 # 通知队列目录
@@ -711,23 +712,68 @@ def get_conversation_jsonl(date_str: str = None) -> Path | None:
     return path if path.exists() else None
 
 
-def get_chunking_dir(date_str: str = None) -> Path:
-    """获取指定日期的 chunking 输出目录。"""
+# Agent workspace 映射：agent_name → workspace 目录
+# main agent 使用默认 WORKSPACE_DIR，其他 agent 使用 workspace-<name>
+AGENT_WORKSPACE_MAP: dict[str, Path] = {}
+
+
+def get_agent_workspace(agent_name: str) -> Path:
+    """获取指定 agent 的 workspace 目录。"""
+    if agent_name in AGENT_WORKSPACE_MAP:
+        return AGENT_WORKSPACE_MAP[agent_name]
+    if agent_name == "main":
+        return WORKSPACE_DIR
+    return OPENCLAW_ROOT / f"workspace-{agent_name}"
+
+
+def get_chunking_dir(date_str: str = None, agent_name: str = None) -> Path:
+    """获取指定日期的 chunking 输出目录。支持 agent 分区。"""
     if date_str is None:
         date_str = get_today_str()
+    if agent_name:
+        return CHUNKING_DIR / agent_name / date_str
     return CHUNKING_DIR / date_str
 
 
-def list_session_files(date_str: str = None) -> list[Path]:
+def get_abstracted_dir(task_type: str, agent_name: str = None) -> Path:
+    """获取摘要输出目录。支持 agent 分区。"""
+    base = {
+        "daily": ABSTRACTED_DAILY_DIR,
+        "weekly": ABSTRACTED_WEEKLY_DIR,
+        "monthly": ABSTRACTED_MONTHLY_DIR,
+    }[task_type]
+    if agent_name:
+        return base / agent_name
+    return base
+
+
+def list_agents(date_str: str = None) -> list[str]:
+    """从 chunking 目录发现所有 agent。main 排在第一位。"""
+    if date_str is None:
+        date_str = get_today_str()
+    agents = []
+    # 新结构：chunking/<agent>/<date>/
+    for d in CHUNKING_DIR.iterdir():
+        if d.is_dir() and (d / date_str).exists():
+            agents.append(d.name)
+    # 兼容旧结构（无 agent 分区）：chunking/<date>/
+    if not agents and (CHUNKING_DIR / date_str).exists():
+        agents.append("main")
+    # main 排第一
+    agents.sort(key=lambda a: (a != "main", a))
+    return agents
+
+
+def list_session_files(date_str: str = None, agent_name: str = None) -> list[Path]:
     """列出指定日期 chunking 目录下的会话 .md 文件，按文件名排序。"""
-    chunk_dir = get_chunking_dir(date_str)
+    chunk_dir = get_chunking_dir(date_str, agent_name)
     if not chunk_dir.exists():
         return []
     files = sorted(chunk_dir.glob("*-会话*.md"))
     return files
 
 
-def list_daily_abstracts(days: int = 7, end_date: str = None) -> list[Path]:
+def list_daily_abstracts(days: int = 7, end_date: str = None, agent_name: str = None) -> list[Path]:
     """列出最近 N 天的 daily abstracted 文件。"""
     if end_date is None:
         end = datetime.now()
@@ -735,19 +781,21 @@ def list_daily_abstracts(days: int = 7, end_date: str = None) -> list[Path]:
         end = datetime.strptime(end_date, "%Y-%m-%d")
 
     from datetime import timedelta
+    abstract_dir = get_abstracted_dir("daily", agent_name)
     result = []
     for i in range(days):
         d = end - timedelta(days=i)
-        path = ABSTRACTED_DAILY_DIR / f"{d.strftime('%Y-%m-%d')}-abstracted.md"
+        path = abstract_dir / f"{d.strftime('%Y-%m-%d')}-abstracted.md"
         if path.exists():
             result.append(path)
     return sorted(result)
 
 
-def list_monthly_weekly_abstracts(year: int, month: int) -> list[Path]:
+def list_monthly_weekly_abstracts(year: int, month: int, agent_name: str = None) -> list[Path]:
     """列出指定月份的所有 weekly abstracted 文件。"""
+    abstract_dir = get_abstracted_dir("weekly", agent_name)
     result = []
-    for p in ABSTRACTED_WEEKLY_DIR.glob("*-abstracted.md"):
+    for p in abstract_dir.glob("*-abstracted.md"):
         name = p.stem.replace("-abstracted", "")
         parts = name.split("至")
         if len(parts) != 2:

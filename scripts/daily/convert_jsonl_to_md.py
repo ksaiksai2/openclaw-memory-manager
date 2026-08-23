@@ -96,6 +96,7 @@ def load_messages(path, encoding="utf-8"):
     """读取 jsonl, 返回 (消息列表, 解析错误数)。
 
     消息按 timestamp 升序排列; 每条为 dict, 仅保留所需字段。
+    新增 agent_name 字段，从 sessionKey 中提取。
     """
     messages = []
     errors = 0
@@ -118,7 +119,6 @@ def load_messages(path, encoding="utf-8"):
             if isinstance(content, str):
                 text = content
             else:
-                # content 可能是结构化对象, 转成可读 JSON 文本
                 text = json.dumps(content, ensure_ascii=False, indent=2)
             if not text.strip():
                 continue
@@ -126,11 +126,15 @@ def load_messages(path, encoding="utf-8"):
                 ts = int(obj.get("timestamp", 0))
             except (TypeError, ValueError):
                 ts = 0
+            # 从 sessionKey 提取 agent 名: agent:<name>:<context>:<uuid>
+            sk = str(obj.get("sessionKey", ""))
+            agent_name = sk.split(":")[1] if sk.startswith("agent:") and sk.count(":") >= 2 else "main"
             messages.append({
                 "sessionId": str(obj.get("sessionId", "")),
                 "role": str(obj.get("role", "")),
                 "content": text,
                 "ts": ts,
+                "agent_name": agent_name,
             })
     messages.sort(key=lambda m: m["ts"])
     return messages, errors
@@ -321,59 +325,72 @@ def main():
           + (f"，跳过解析失败行 {errors} 条" if errors else ""))
 
     date_str = output_date(src, messages)
-    groups = group_sessions(messages)
-    session_count = len(groups)
-    print(f"      会话段: {session_count}")
 
-    # 逐会话处理: 汇报压缩 + 最后 N 轮截断 (记录每个会话的原始条数)
-    prepared = []  # (会话编号, sessionId, 处理后的消息, 该会话原始条数)
-    for idx, (sid, msgs) in enumerate(groups, 1):
-        orig = len(msgs)
+    # 按 agent 分组
+    from collections import OrderedDict
+    agents_msgs = OrderedDict()
+    for msg in messages:
+        aname = msg.get("agent_name", "main")
+        agents_msgs.setdefault(aname, []).append(msg)
+
+    agent_names = sorted(agents_msgs.keys(), key=lambda a: (a != "main", a))
+    print(f"      发现 {len(agent_names)} 个 agent: {', '.join(agent_names)}")
+
+    base_out = args.out or os.path.dirname(os.path.abspath(src))
+
+    for agent_name in agent_names:
+        agent_msgs = agents_msgs[agent_name]
+        print(f"\n{'='*40}")
+        print(f"  Agent: {agent_name} ({len(agent_msgs)} 条消息)")
+        print(f"{'='*40}")
+
+        groups = group_sessions(agent_msgs)
+        session_count = len(groups)
+        print(f"      会话段: {session_count}")
+
+        # 逐会话处理
+        prepared = []
+        for idx, (sid, msgs) in enumerate(groups, 1):
+            orig = len(msgs)
+            if not args.full:
+                msgs = collapse_to_reports(msgs)
+                if args.last > 0:
+                    msgs = trim_to_last_turns(msgs, args.last)
+            prepared.append((idx, sid, msgs, orig))
+
         if not args.full:
-            msgs = collapse_to_reports(msgs)
-            if args.last > 0:
-                msgs = trim_to_last_turns(msgs, args.last)
-        prepared.append((idx, sid, msgs, orig))
+            kept = sum(len(m) for _, _, m, _ in prepared)
+            print(f"      精简: 原始 {len(agent_msgs)} 条 → 保留 {kept} 条")
 
-    if not args.full:
-        collapsed = sum(len(m) for _, _, m, o in prepared if len(m) < o)
-        kept = sum(len(m) for _, _, m, _ in prepared)
-        print(f"      精简: 原始 {len(messages)} 条 → 保留 {kept} 条"
-              f"（省略 {len(messages) - kept} 条）")
-
-    base_dir = os.path.dirname(os.path.abspath(src))
-
-    if args.merge:
-        # 合并模式: 所有会话写进同一个文件
-        merged = []
-        for _, _, msgs, _ in prepared:
-            merged.extend(msgs)
-        out = args.out or os.path.join(base_dir, f"{date_str}.md")
-        print(f"[2/3] 生成 Markdown (合并 {session_count} 个会话) ...")
-        md = build_md(merged, src, date_str, flat=args.flat,
-                      original_total=len(messages), last_n=args.last)
-        print(f"[3/3] 写入 {out} ...")
-        with open(out, "w", encoding="utf-8") as f:
-            f.write(md)
-        print(f"完成 ✔  输出: {out}  ({len(md)} 字符)")
-    else:
-        # 拆分模式: 每个会话一个文件, 文件名 YYYY-MM-DD-会话XX.md
-        out_dir = args.out or base_dir
-        if not os.path.isdir(out_dir):
-            os.makedirs(out_dir, exist_ok=True)
-        print(f"[2/3] 生成 Markdown (按会话拆分 {session_count} 个文件) ...")
-        written = []
-        for idx, sid, msgs, orig in prepared:
-            md = build_session_md(idx, session_count, msgs, src, date_str,
-                                  original_total=orig, last_n=args.last, sid=sid)
-            out = os.path.join(out_dir, f"{date_str}-会话{idx:02d}.md")
+        if args.merge:
+            merged = []
+            for _, _, msgs, _ in prepared:
+                merged.extend(msgs)
+            out = os.path.join(base_out, f"{date_str}.md")
+            print(f"[2/3] 生成 Markdown (合并 {session_count} 个会话) ...")
+            md = build_md(merged, src, date_str, flat=args.flat,
+                          original_total=len(agent_msgs), last_n=args.last)
+            print(f"[3/3] 写入 {out} ...")
             with open(out, "w", encoding="utf-8") as f:
                 f.write(md)
-            written.append((out, len(msgs)))
-        print(f"[3/3] 写入 {len(written)} 个文件 ...")
-        for out, n in written:
-            print(f"      会话 {os.path.basename(out)}: {n} 条")
-        print(f"完成 ✔  输出目录: {out_dir}")
+            print(f"完成 ✔  输出: {out}  ({len(md)} 字符)")
+        else:
+            # 输出到 <base_out>/<agent_name>/<date>/
+            out_dir = os.path.join(base_out, agent_name, date_str)
+            os.makedirs(out_dir, exist_ok=True)
+            print(f"[2/3] 生成 Markdown (按会话拆分 {session_count} 个文件) ...")
+            written = []
+            for idx, sid, msgs, orig in prepared:
+                md = build_session_md(idx, session_count, msgs, src, date_str,
+                                      original_total=orig, last_n=args.last, sid=sid)
+                out = os.path.join(out_dir, f"{date_str}-会话{idx:02d}.md")
+                with open(out, "w", encoding="utf-8") as f:
+                    f.write(md)
+                written.append((out, len(msgs)))
+            print(f"[3/3] 写入 {len(written)} 个文件 ...")
+            for out, n in written:
+                print(f"      会话 {os.path.basename(out)}: {n} 条")
+            print(f"完成 ✔  输出目录: {out_dir}")
 
 
 if __name__ == "__main__":
