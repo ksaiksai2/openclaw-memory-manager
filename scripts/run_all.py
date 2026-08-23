@@ -89,9 +89,9 @@ def main():
 
     print()
     if all_ok:
-        print("[调度] 全部完成 ✓")
+        print("[调度] 全部完成 OK")
     else:
-        print("[调度] 部分任务失败 ✗")
+        print("[调度] 部分任务失败")
 
     return 0 if all_ok else 1
 
