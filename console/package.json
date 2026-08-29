@@ -1,0 +1,13 @@
+{
+  "name": "omm-console",
+  "version": "1.0.0",
+  "description": "OpenClaw Memory Manager 控制台",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^28.0.0"
+  }
+}

@@ -33,17 +33,22 @@ def ensure_queue_dir():
     os.makedirs(QUEUE_DIR, exist_ok=True)
 
 
-def send_toast(title: str, message: str):
+def send_toast(title: str, message: str, silent: bool = False):
     """发送 WinRT Toast 通知，进通知中心。"""
+    audio_tag = '<audio silent="true"/>' if silent else ''
     xml = XmlDocument()
     xml.load_xml(
-        '<toast><visual><binding template="ToastGeneric">'
+        '<toast scenario="reminder">'
+        '<visual><binding template="ToastGeneric">'
         f"<text>{title}</text>"
         f"<text>{message}</text>"
-        "</binding></visual></toast>"
+        "</binding></visual>"
+        f"{audio_tag}"
+        "</toast>"
     )
+    notification = ToastNotification(xml)
     notifier = ToastNotificationManager.create_toast_notifier_with_id(AUMID)
-    notifier.show(ToastNotification(xml))
+    notifier.show(notification)
 
 
 def process_queue():
@@ -62,7 +67,8 @@ def process_queue():
                 data = json.load(fp)
             title = data.get("title", "OpenClaw 记忆整理")
             message = data.get("message", "")
-            send_toast(title, message)
+            silent = data.get("silent", False)
+            send_toast(title, message, silent=silent)
         except Exception:
             pass
         finally:

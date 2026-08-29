@@ -47,10 +47,43 @@ OPENCLAW_ROOT = Path(os.environ.get(
     str(_auto_detect_openclaw_root())
 ))
 
-# 输入源：会话记录目录（TencentDB Agent Memory 插件产生）
+# 输入源：会话记录目录（TencentDB Agent Memory 插件产生，已弃用）
 CONVERSATIONS_DIR = Path(os.environ.get(
     "MM_CONVERSATIONS_DIR",
     str(OPENCLAW_ROOT / "memory-tdai" / "conversations")
+))
+
+# OpenClaw 配置文件路径
+OPENCLAW_CONFIG = OPENCLAW_ROOT / "openclaw.json"
+
+# Agent sessions 根目录（包含各 agent 的 sessions 子目录）
+AGENTS_DIR = OPENCLAW_ROOT / "agents"
+
+# 输入源：OpenClaw 原生 sessions 目录（自动探测主 agent，可 MM_SESSIONS_DIR 覆盖）
+def _auto_detect_sessions_dir() -> Path:
+    """自动探测主 agent 的 sessions 目录：openclaw.json 第一个 agent → agents 目录第一个 → main。"""
+    try:
+        if OPENCLAW_CONFIG.exists():
+            import re
+            with open(OPENCLAW_CONFIG, "r", encoding="utf-8-sig") as f:
+                content = re.sub(r',\s*([}\]])', r'\1', f.read())
+            cfg = json.loads(content)
+            agents = cfg.get("agents", {}).get("list", [])
+            for agent in agents:
+                agent_id = agent.get("id", "")
+                if agent_id and (AGENTS_DIR / agent_id / "sessions").exists():
+                    return AGENTS_DIR / agent_id / "sessions"
+    except Exception:
+        pass
+    if AGENTS_DIR.exists():
+        for d in sorted(AGENTS_DIR.iterdir()):
+            if d.is_dir() and (d / "sessions").exists():
+                return d / "sessions"
+    return AGENTS_DIR / "main" / "sessions"
+
+SESSIONS_DIR = Path(os.environ.get(
+    "MM_SESSIONS_DIR",
+    str(_auto_detect_sessions_dir())
 ))
 
 # workspace 目录（USER.md / MEMORY.md / AGENTS.md 所在）
@@ -80,6 +113,11 @@ NOTIFY_QUEUE = Path(os.environ.get(
 # ────────────────────── Provider 预设 ──────────────────────
 
 LLM_PROVIDERS = {
+    "xiaomi": {
+        "name": "Xiaomi MiMo",
+        "api_url": "https://api.xiaomimimo.com/v1/chat/completions",
+        "model": "mimo-v2.5-pro",
+    },
     "deepseek": {
         "name": "DeepSeek",
         "api_url": "https://api.deepseek.com/v1/chat/completions",
@@ -103,7 +141,7 @@ LLM_PROVIDERS = {
     "zhipu": {
         "name": "智谱 GLM",
         "api_url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-        "model": "glm-4-flash",
+        "model": "glm-4.7-flash",
     },
     "siliconflow": {
         "name": "SiliconFlow",
@@ -114,7 +152,7 @@ LLM_PROVIDERS = {
 
 # ────────────────────── LLM 配置 ──────────────────────
 
-LLM_PROVIDER = os.environ.get("MM_LLM_PROVIDER", "deepseek")
+LLM_PROVIDER = os.environ.get("MM_LLM_PROVIDER", "zhipu")
 _preset = LLM_PROVIDERS.get(LLM_PROVIDER, {})
 
 LLM_API_URL = os.environ.get("MM_LLM_API_URL", _preset.get("api_url", ""))
@@ -186,7 +224,14 @@ _EVOLUTION_FILE_GUIDE = (
     "- 进化方向：大部分内容是固定的行为指令，不能随意改写\n"
     "- ⚠️ 严格保护：原有的规则、指令、格式结构必须保留，不得删除或改写\n"
     "- ✅ 允许的操作：仅当会话中出现了新的、明确的用户指令（如「以后XXX情况不要YYY」）\n"
-    "  才可以在对应章节追加新规则；如果没有此类指令，原样返回，不做任何修改\n"
+    "  才可以在对应章节追加新规则；如果没有此类指令，原样返回，不做任何修改\n\n"
+    "【进化视角 — 根据 agent 类型自适应】\n"
+    "- 仔细阅读 AGENTS.md，判断该 agent 的定位：\n"
+    "  · 助手型 agent（如：服务于用户的工具、助手）：以用户为中心进化，关注用户需求、偏好、习惯\n"
+    "  · 独立人格型 agent（如：有自己人格、角色、世界观的 agent）：以该 agent 自己的视角进化，\n"
+    "    代入其人格，记录它自己的经历、感受、成长、人际关系，而非以用户为中心\n"
+    "- USER.md 对于独立人格型 agent 应理解为「该 agent 的自我画像」而非「用户画像」\n"
+    "- MEMORY.md 对于独立人格型 agent 应理解为「该 agent 的记忆/经历」而非「用户的项目记录」\n"
 )
 
 EVOLUTION_SIZE_LIMITS = (
@@ -618,7 +663,7 @@ def parse_deepseek_evolution(content: str) -> dict[str, str] | None:
 _STATUS_FILE = LOG_DIR / "latest_status.txt"
 
 
-def send_notification(title: str, message: str, is_error: bool = False):
+def send_notification(title: str, message: str, is_error: bool = False, silent: bool = False):
     """发送通知：写状态文件 + 写队列文件（由 NotificationAgent 消费）。"""
     if len(message) > 200:
         message = message[:197] + "..."
@@ -638,6 +683,7 @@ def send_notification(title: str, message: str, is_error: bool = False):
             "title": title,
             "message": message,
             "is_error": is_error,
+            "silent": silent,
             "ts": ts,
         }, ensure_ascii=False))
     except Exception:
@@ -712,16 +758,93 @@ def get_conversation_jsonl(date_str: str = None) -> Path | None:
     return path if path.exists() else None
 
 
+def get_openclaw_agents() -> list[dict[str, str]]:
+    """从 openclaw.json 读取直属 agent 列表。
+
+    Returns:
+        [{"id": "kavis", "name": "KAVIS", "workspace": "..."}, ...]
+    """
+    if not OPENCLAW_CONFIG.exists():
+        # 回退：返回 agents 目录下存在的 agent
+        agents = []
+        if AGENTS_DIR.exists():
+            for d in AGENTS_DIR.iterdir():
+                if d.is_dir() and (d / "sessions").exists():
+                    agents.append({"id": d.name, "name": d.name, "workspace": ""})
+        return agents
+
+    try:
+        # 使用 utf-8-sig 处理 BOM
+        with open(OPENCLAW_CONFIG, "r", encoding="utf-8-sig") as f:
+            content = f.read()
+        # 尝试修复常见的 JSON 语法错误（如末尾逗号）
+        import re
+        # 移除数组和对象中的末尾逗号
+        content = re.sub(r',\s*([}\]])', r'\1', content)
+        config = json.loads(content)
+    except (json.JSONDecodeError, OSError):
+        # 回退：返回 agents 目录下存在的 agent
+        agents = []
+        if AGENTS_DIR.exists():
+            for d in AGENTS_DIR.iterdir():
+                if d.is_dir() and (d / "sessions").exists():
+                    agents.append({"id": d.name, "name": d.name, "workspace": ""})
+        return agents
+
+    agents_list = config.get("agents", {}).get("list", [])
+    result = []
+    for agent in agents_list:
+        agent_id = agent.get("id", "")
+        if not agent_id:
+            continue
+        # 检查 sessions 目录是否存在
+        sessions_dir = AGENTS_DIR / agent_id / "sessions"
+        if not sessions_dir.exists():
+            continue
+        result.append({
+            "id": agent_id,
+            "name": agent.get("name", agent_id),
+            "workspace": agent.get("workspace", ""),
+        })
+    return result
+
+
+def get_agent_sessions_dir(agent_id: str) -> Path:
+    """获取指定 agent 的 sessions 目录路径。"""
+    return AGENTS_DIR / agent_id / "sessions"
+
+
 # Agent workspace 映射：agent_name → workspace 目录
-# main agent 使用默认 WORKSPACE_DIR，其他 agent 使用 workspace-<name>
-AGENT_WORKSPACE_MAP: dict[str, Path] = {}
+# 从 openclaw.json 动态加载，缓存避免重复读取
+_AGENT_WORKSPACE_CACHE: dict[str, Path] = {}
+
+
+def _load_agent_workspaces() -> dict[str, Path]:
+    """从 openclaw.json 加载所有 agent 的 workspace 映射。"""
+    if _AGENT_WORKSPACE_CACHE:
+        return _AGENT_WORKSPACE_CACHE
+
+    agents = get_openclaw_agents()
+    for agent in agents:
+        agent_id = agent["id"]
+        ws = agent.get("workspace", "")
+        if ws:
+            _AGENT_WORKSPACE_CACHE[agent_id] = Path(ws)
+        elif agent_id.lower() == "kavis":
+            _AGENT_WORKSPACE_CACHE[agent_id] = WORKSPACE_DIR
+        else:
+            _AGENT_WORKSPACE_CACHE[agent_id] = OPENCLAW_ROOT / f"workspace-{agent_id}"
+
+    return _AGENT_WORKSPACE_CACHE
 
 
 def get_agent_workspace(agent_name: str) -> Path:
     """获取指定 agent 的 workspace 目录。"""
-    if agent_name in AGENT_WORKSPACE_MAP:
-        return AGENT_WORKSPACE_MAP[agent_name]
-    if agent_name == "main":
+    ws_map = _load_agent_workspaces()
+    if agent_name in ws_map:
+        return ws_map[agent_name]
+    # 回退
+    if agent_name.lower() == "kavis":
         return WORKSPACE_DIR
     return OPENCLAW_ROOT / f"workspace-{agent_name}"
 
@@ -758,9 +881,9 @@ def list_agents(date_str: str = None) -> list[str]:
             agents.append(d.name)
     # 兼容旧结构（无 agent 分区）：chunking/<date>/
     if not agents and (CHUNKING_DIR / date_str).exists():
-        agents.append("main")
-    # main 排第一
-    agents.sort(key=lambda a: (a != "main", a))
+        agents.append("kavis")
+    # KAVIS 排第一（大小写不敏感）
+    agents.sort(key=lambda a: (a.lower() != "kavis", a))
     return agents
 
 

@@ -94,38 +94,48 @@ def main():
         # ════════════════════════════════════════════
         # 遍历每个 Agent 进行记忆整理
         # ════════════════════════════════════════════
-        all_agents_success = True
+        agent_results = {}  # {agent_name: {"success": bool, "error": str}}
         for agent_name in agents:
             logger.info("=" * 60)
             logger.info(f"开始处理 Agent: {agent_name}")
             logger.info("=" * 60)
 
-            agent_success = process_agent(
-                agent_name=agent_name,
-                year=year,
-                month=month,
-                month_label=month_label,
-                dry_run=dry_run,
-                logger=logger,
-            )
-
-            if not agent_success:
-                all_agents_success = False
-                logger.error(f"Agent {agent_name} 处理失败")
-                send_notification(
-                    "OpenClaw 记忆整理",
-                    f"Agent {agent_name} 月度整理失败",
-                    is_error=True,
+            try:
+                agent_success = process_agent(
+                    agent_name=agent_name,
+                    year=year,
+                    month=month,
+                    month_label=month_label,
+                    dry_run=dry_run,
+                    logger=logger,
                 )
+                agent_results[agent_name] = {"success": agent_success, "error": "" if agent_success else "处理失败"}
+                if not agent_success:
+                    logger.error(f"Agent {agent_name} 处理失败")
+            except Exception as e:
+                agent_results[agent_name] = {"success": False, "error": str(e)[:50]}
+                logger.exception(f"Agent {agent_name} 处理异常: {e}")
 
         # ════════════════════════════════════════════
-        # 完成
+        # 完成 - 汇总结果通知
         # ════════════════════════════════════════════
-        success = all_agents_success
+        success = all(r["success"] for r in agent_results.values())
         logger.info("=" * 60)
-        logger.info("每月记忆整理完成")
+        if success:
+            logger.info("每月记忆整理完成（所有 Agent 成功）")
+            send_notification("OpenClaw 记忆整理", "每月记忆整理完成！")
+        else:
+            success_agents = [name for name, r in agent_results.items() if r["success"]]
+            failed_agents = [name for name, r in agent_results.items() if not r["success"]]
+            detail_parts = []
+            if success_agents:
+                detail_parts.append(f"成功: {', '.join(success_agents)}")
+            if failed_agents:
+                detail_parts.append(f"失败: {', '.join(failed_agents)}")
+            detail = " | ".join(detail_parts)
+            logger.warning(f"每月记忆整理部分失败: {detail}")
+            send_notification("OpenClaw 记忆整理", f"部分失败 - {detail}", is_error=True)
         logger.info("=" * 60)
-        send_notification("OpenClaw 记忆整理", "每月记忆整理完成！")
 
     except Exception as e:
         logger.exception(f"每月任务异常: {e}")
@@ -244,7 +254,7 @@ def process_agent(
     atomic_write(abstract_path, abstract_content)
     logger.info(f"月度摘要写入: {abstract_path} ({len(abstract_content)} 字符)")
 
-    send_notification("OpenClaw 记忆整理", f"Abstracting Done! ({agent_name})")
+    send_notification("OpenClaw 记忆整理", f"Abstracting Done! ({agent_name})", silent=True)
 
     # ── 步骤 3：云端模型进化 USER/MEMORY/AGENTS ──
     logger.info(f"[步骤 3] 云端模型进化 (Agent: {agent_name})")
@@ -264,7 +274,7 @@ def process_agent(
         return False
 
     logger.info(f"Agent {agent_name} 处理完成")
-    send_notification("OpenClaw 记忆整理", f"{agent_name} 每月整理完成！")
+    send_notification("OpenClaw 记忆整理", f"{agent_name} 每月整理完成！", silent=True)
     return True
 
 

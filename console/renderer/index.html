@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OMM控制台</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Ambient background layer -->
+  <div class="ambient-bg">
+    <div class="ambient-orb orb-1"></div>
+    <div class="ambient-orb orb-2"></div>
+    <div class="ambient-orb orb-3"></div>
+  </div>
+
+  <div class="app">
+    <header class="header">
+      <div class="logo">
+        <div class="logo-icon">OMM</div>
+        <h1>OMM <span class="logo-sub">Memory Manager</span></h1>
+      </div>
+      <div class="header-actions">
+        <div class="status-pill">
+          <span class="status-dot"></span>
+          <span id="status">就绪</span>
+        </div>
+      </div>
+    </header>
+
+    <main class="main">
+      <!-- Left sidebar -->
+      <aside class="sidebar">
+        <div class="glass-card">
+          <h2 class="card-title">LLM 配置</h2>
+          <div class="llm-card">
+          <div class="form-group">
+            <label>服务商</label>
+            <select id="provider">
+              <option value="">自定义</option>
+            </select>
+            <div class="hint">选择服务商自动填充 API 地址与模型</div>
+          </div>
+          <div class="form-group">
+            <label>模型名称</label>
+            <input type="text" id="model" placeholder="deepseek-v4-flash">
+          </div>
+          <div class="form-group form-group--full">
+            <label>API 地址</label>
+            <input type="text" id="apiUrl" placeholder="https://api.deepseek.com/v1/chat/completions">
+          </div>
+          <div class="form-group form-group--full">
+            <label>API Key</label>
+            <div class="input-with-button">
+              <input type="password" id="apiKey" placeholder="sk-...">
+              <button class="btn-icon" id="toggleKey" title="显示/隐藏">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group half">
+              <label>温度</label>
+              <input type="number" id="temperature" min="0" max="2" step="0.1" value="0.1">
+            </div>
+            <div class="form-group half">
+              <label>Top P</label>
+              <input type="number" id="topP" min="0" max="1" step="0.1" value="0.8">
+            </div>
+          </div>
+          <div class="form-group">
+            <label>推理档位 <span id="reasoningStatus" class="badge"></span></label>
+            <select id="thinkingLevel">
+              <option value="off">关闭</option>
+              <option value="low">低</option>
+              <option value="medium">中</option>
+              <option value="high">高</option>
+            </select>
+          </div>
+          <button class="btn btn-accent" id="saveConfig">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+            保存配置
+          </button>
+          </div>
+        </div>
+
+        <div class="glass-card">
+          <div class="calendar" id="calendar">
+            <div class="cal-head">
+              <button class="btn-icon cal-nav" id="calPrev" title="上个月">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+              </button>
+              <span class="cal-title" id="calTitle"></span>
+              <button class="btn-icon cal-nav" id="calNext" title="下个月">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+              </button>
+            </div>
+            <div class="cal-weekdays">
+              <span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span>
+            </div>
+            <div class="cal-days" id="calDays"></div>
+          </div>
+        </div>
+
+        <div class="glass-card">
+          <h2 class="card-title">任务</h2>
+          <div class="task-grid">
+            <button class="btn btn-task" id="btnRunDaily">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+              每日
+            </button>
+            <button class="btn btn-task" id="btnRunWeekly">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+              每周
+            </button>
+            <button class="btn btn-task" id="btnRunMonthly">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z"/><path d="M12 6v6l4 2"/></svg>
+              每月
+            </button>
+            <button class="btn btn-task btn-task-ghost" id="btnRunDry">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+              Dry Run
+            </button>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Right content -->
+      <div class="content">
+        <nav class="tab-bar">
+          <button class="tab active" data-tab="workspace">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+            Workspace
+          </button>
+          <button class="tab" data-tab="log">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+            运行日志
+          </button>
+          <button class="tab" data-tab="tasklog">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+            任务日志
+          </button>
+        </nav>
+
+        <!-- Workspace -->
+        <div class="tab-content active" id="tab-workspace">
+          <div class="toolbar">
+            <select id="workspaceFile">
+              <option value="USER.md">USER.md</option>
+              <option value="MEMORY.md">MEMORY.md</option>
+              <option value="AGENTS.md">AGENTS.md</option>
+            </select>
+            <button class="btn btn-sm" id="btnLoadWorkspace">加载</button>
+            <button class="btn btn-sm btn-accent" id="btnSaveWorkspace">保存</button>
+            <span class="toolbar-info" id="workspaceInfo"></span>
+          </div>
+          <textarea class="workspace-editor" id="workspaceContent" placeholder="选择文件并点击加载..."></textarea>
+        </div>
+
+        <!-- Run log -->
+        <div class="tab-content" id="tab-log">
+          <div class="toolbar">
+            <button class="btn btn-sm" id="btnClearLog">清空</button>
+          </div>
+          <div class="log-area" id="logArea"></div>
+        </div>
+
+        <!-- Task log -->
+        <div class="tab-content" id="tab-tasklog">
+          <div class="toolbar">
+            <select id="taskLogSelect">
+              <option value="">选择日志文件...</option>
+            </select>
+            <button class="btn btn-sm" id="btnRefreshLogs">刷新</button>
+            <button class="btn btn-sm" id="btnRefreshStatus">刷新状态</button>
+          </div>
+          <div class="log-area" id="taskLogContent"></div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

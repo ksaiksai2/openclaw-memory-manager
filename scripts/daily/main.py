@@ -18,8 +18,12 @@ if PROJECT_SCRIPTS not in sys.path:
 from datetime import datetime
 from pathlib import Path
 
+# 每日增量 chunking 脚本（双份输出：嵌套分类源 + 扁平检索副本）
+RECHUNK_DAILY_SCRIPT = Path(PROJECT_SCRIPTS) / "rechunk_daily.py"
+
 from common.utils import (
     ABSTRACTED_DAILY_DIR,
+    AGENTS_DIR,
     CHUNKING_DIR,
     CHUNKING_SCRIPT,
     FILE_SIZE_LIMITS,
@@ -28,6 +32,7 @@ from common.utils import (
     MARKER_USER,
     MAX_INPUT_CHARS,
     SPLIT_THRESHOLD,
+    WORKSPACE_DIR,
     TaskLock,
     atomic_write,
     backup_file,
@@ -37,8 +42,8 @@ from common.utils import (
     get_abstracted_dir,
     get_agent_workspace,
     get_chunking_dir,
-    get_conversation_jsonl,
     get_evolution_system_prompt,
+    get_openclaw_agents,
     get_today_compact,
     get_today_str,
     list_agents,
@@ -79,27 +84,34 @@ def main():
     success = False
     try:
         # ════════════════════════════════════════════
-        # 步骤 1：会话 chunking（一次性，按 agent 分区输出）
+        # 步骤 1：会话 chunking（一次性，从 OpenClaw sessions 目录读取，按 agent 分区输出）
         # ════════════════════════════════════════════
         logger.info("[步骤 1] 会话 chunking")
-        jsonl_path = get_conversation_jsonl(today)
-        # chunking 输出到 CHUNKING_DIR 根目录，脚本内部按 agent 分子目录
         chunk_base = CHUNKING_DIR
         ensure_dir(chunk_base)
 
         no_conversation = False
-        if jsonl_path is None:
-            logger.info(f"当日无会话文件: {today}.jsonl")
+        if not AGENTS_DIR.is_dir():
+            logger.info(f"agents 目录不存在: {AGENTS_DIR}")
             marker = chunk_base / "NO_CONVERSATION.txt"
-            atomic_write(marker, f"当日 {today} 无会话记录\n")
+            atomic_write(marker, f"当日 {today} 无会话记录（agents 目录不存在）\n")
             no_conversation = True
         else:
-            logger.info(f"源文件: {jsonl_path}")
-            ok = run_chunking(jsonl_path, chunk_base, logger)
-            if not ok:
-                logger.error("chunking 失败")
-                send_notification("OpenClaw 记忆整理", "会话 chunking 失败", is_error=True)
-                return
+            # 检查是否有直属 agent
+            agents_info = get_openclaw_agents()
+            if not agents_info:
+                logger.info("未找到任何直属 agent")
+                marker = chunk_base / "NO_CONVERSATION.txt"
+                atomic_write(marker, f"当日 {today} 无会话记录（未找到直属 agent）\n")
+                no_conversation = True
+            else:
+                logger.info(f"agents 目录: {AGENTS_DIR}")
+                logger.info(f"直属 agent: {', '.join(a['id'] for a in agents_info)}")
+                ok = run_chunking(AGENTS_DIR, chunk_base, logger)
+                if not ok:
+                    logger.error("chunking 失败")
+                    send_notification("OpenClaw 记忆整理", "会话 chunking 失败", is_error=True)
+                    return
 
         # 发现所有 agent
         agents = list_agents(today) if not no_conversation else []
@@ -110,11 +122,13 @@ def main():
         if agents:
             logger.info(f"发现 {len(agents)} 个 agent: {', '.join(agents)}")
 
-        send_notification("OpenClaw 记忆整理", "Chunking Done!")
+        send_notification("OpenClaw 记忆整理", "Chunking Done!", silent=True)
 
         # ════════════════════════════════════════════
-        # 步骤 2 & 3：逐 agent 提炼摘要 + 进化（main 优先）
+        # 步骤 2 & 3：逐 agent 提炼摘要 + 进化（kavis 优先）
         # ════════════════════════════════════════════
+        agent_results = {}  # {agent_name: {"success": bool, "error": str}}
+
         for agent_name in agents:
             agent_ws = get_agent_workspace(agent_name)
             abstract_dir = get_abstracted_dir("daily", agent_name)
@@ -124,6 +138,9 @@ def main():
             logger.info(f"  Agent: {agent_name} | Workspace: {agent_ws}")
             logger.info(f"  会话文件: {len(session_files)} 个")
             logger.info(f"{'='*40}")
+
+            agent_ok = True
+            agent_error = ""
 
             # ── 步骤 2：提炼摘要 ──
             logger.info(f"[{agent_name}] 步骤 2: 提炼摘要")
@@ -232,7 +249,7 @@ def main():
                 atomic_write(abstract_path, abstract_content)
                 logger.info(f"[{agent_name}] 摘要写入: {abstract_path} ({total_chars} 字符)")
 
-            send_notification("OpenClaw 记忆整理", f"{agent_name} Abstracting Done!")
+            send_notification("OpenClaw 记忆整理", f"{agent_name} Abstracting Done!", silent=True)
 
             # ── 步骤 3：进化 ──
             logger.info(f"[{agent_name}] 步骤 3: 云端模型进化")
@@ -243,22 +260,33 @@ def main():
                 ok = run_evolution(today, agent_name, agent_ws, abstract_dir, logger)
                 if not ok:
                     logger.error(f"[{agent_name}] 云端进化失败")
-                    send_notification("OpenClaw 记忆整理", f"{agent_name} 云端进化失败", is_error=True)
-                    # 其他 agent 失败不阻塞 main
-                    if agent_name == "main":
-                        return
-                    continue
+                    agent_ok = False
+                    agent_error = "云端进化失败"
 
-            send_notification("OpenClaw 记忆整理", f"{agent_name} 每日整理完成！")
+            agent_results[agent_name] = {"success": agent_ok, "error": agent_error}
+            if agent_ok:
+                send_notification("OpenClaw 记忆整理", f"{agent_name} 每日整理完成！", silent=True)
 
         # ════════════════════════════════════════════
-        # 完成
+        # 完成 - 汇总结果通知
         # ════════════════════════════════════════════
-        success = True
+        success = all(r["success"] for r in agent_results.values())
         logger.info("=" * 60)
-        logger.info("每日记忆整理完成（所有 agent）")
+        if success:
+            logger.info("每日记忆整理完成（所有 agent 成功）")
+            send_notification("OpenClaw 记忆整理", "每日记忆整理完成！")
+        else:
+            success_agents = [name for name, r in agent_results.items() if r["success"]]
+            failed_agents = [name for name, r in agent_results.items() if not r["success"]]
+            detail_parts = []
+            if success_agents:
+                detail_parts.append(f"成功: {', '.join(success_agents)}")
+            if failed_agents:
+                detail_parts.append(f"失败: {', '.join(failed_agents)}")
+            detail = " | ".join(detail_parts)
+            logger.warning(f"每日记忆整理部分失败: {detail}")
+            send_notification("OpenClaw 记忆整理", f"部分失败 - {detail}", is_error=True)
         logger.info("=" * 60)
-        send_notification("OpenClaw 记忆整理", "每日记忆整理完成！")
 
     except Exception as e:
         logger.exception(f"每日任务异常: {e}")
@@ -269,16 +297,20 @@ def main():
             logger.info("本轮任务未成功完成")
 
 
-def run_chunking(jsonl_path: Path, output_dir: Path, logger) -> bool:
-    """运行 chunking 脚本，将 jsonl 转为会话 .md 文件（按 agent 分区）。"""
+def run_chunking(agents_dir: Path, output_dir: Path, logger) -> bool:
+    """运行每日增量 chunking 脚本（rechunk_daily.py），双份输出：嵌套分类源 + 扁平检索副本。"""
     import subprocess
+    import shutil
 
+    today = get_today_str()
+    flat_dir = WORKSPACE_DIR / "memory"
     cmd = [
         sys.executable,
-        str(CHUNKING_SCRIPT),
-        str(jsonl_path),
-        "--out",
-        str(output_dir),
+        str(RECHUNK_DAILY_SCRIPT),
+        "--date", today,
+        "--agents-dir", str(agents_dir),
+        "--nested-root", str(output_dir),
+        "--flat-dir", str(flat_dir),
     ]
     logger.info(f"执行: {' '.join(cmd)}")
     try:
@@ -298,6 +330,9 @@ def run_chunking(jsonl_path: Path, output_dir: Path, logger) -> bool:
             if result.stderr:
                 logger.error(f"  stderr: {result.stderr.strip()}")
             return False
+
+        # rechunk_daily.py 已双份输出（嵌套分类源 + 扁平检索副本），无需再复制。
+
         return True
     except subprocess.TimeoutExpired:
         logger.error("chunking 超时 (300s)")
@@ -305,6 +340,40 @@ def run_chunking(jsonl_path: Path, output_dir: Path, logger) -> bool:
     except Exception as e:
         logger.error(f"chunking 异常: {e}")
         return False
+
+
+def copy_chunking_to_workspace(chunking_dir: Path, logger):
+    """将 memory-chunking 目录下当天生成的文件复制到 workspace/memory/。
+
+    平铺格式：workspace/memory/kavis-2026-08-26-会话01.md
+    只复制今天修改过的 .md 文件。
+    """
+    import time
+
+    workspace_memory = WORKSPACE_DIR / "memory"
+    today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    copied = 0
+
+    for agent_dir in chunking_dir.iterdir():
+        if not agent_dir.is_dir():
+            continue
+        agent_name = agent_dir.name
+        for date_dir in agent_dir.iterdir():
+            if not date_dir.is_dir():
+                continue
+            for md_file in date_dir.glob("*.md"):
+                if md_file.stat().st_mtime < today_start:
+                    continue
+                # 平铺命名：agent-date-会话XX.md
+                flat_name = f"{agent_name}-{md_file.name}"
+                dest_file = workspace_memory / flat_name
+                shutil.copy2(str(md_file), str(dest_file))
+                copied += 1
+
+    if copied > 0:
+        logger.info(f"chunking 副本已写入 {workspace_memory}（{copied} 个文件）")
+    else:
+        logger.info(f"当天无 chunking 文件需要复制到 workspace/memory")
 
 
 def run_evolution(date_str: str, agent_name: str, workspace_dir: Path,
